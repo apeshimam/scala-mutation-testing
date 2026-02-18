@@ -1,0 +1,5 @@
+{
+  "name": "scala-mutation-testing",
+  "description": "Semantic mutation testing for Scala — uses Claude's code understanding to generate meaningful mutations that test whether your test suite verifies the intent of your code, not just its syntax.",
+  "version": "1.0.0"
+}
