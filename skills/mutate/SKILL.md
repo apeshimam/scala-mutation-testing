@@ -1,5 +1,5 @@
 ---
-argument-hint: <scala-source-file> [method-name]
+argument-hint: <scala-source-file> [method-name] [--fix] [--diff] [--higher-order]
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
@@ -11,7 +11,10 @@ You are performing **semantic mutation testing** on a Scala source file. Unlike 
 
 Parse the input:
 - First argument: path to the Scala source file (required)
-- Second argument: method name to scope mutations to (optional)
+- Second argument (if not a flag): method name to scope mutations to (optional)
+- `--fix`: After testing, write suggested tests for surviving mutations and verify they work
+- `--diff`: Only mutate lines changed in the current branch vs the base branch
+- `--higher-order`: Enable higher-order mutation testing (also auto-enabled when first-order score is 90%+)
 
 If no arguments are provided, ask the user to specify a Scala source file.
 
@@ -25,39 +28,114 @@ Before doing anything, verify it's safe to proceed.
 
 Use the Read tool to read the file at the specified path. If the file does not exist or is not a `.scala` file, stop and inform the user.
 
-### Step 0.2: Check for uncommitted changes
+### Step 0.2: Check for uncommitted changes to the target file
 
 Run:
 ```bash
-git status --porcelain
+git status --porcelain -- <source-file-path>
 ```
 
-If there is **any output** (uncommitted changes exist), **stop immediately** and tell the user:
+If there is **any output** (the target file has uncommitted changes), **stop immediately** and tell the user:
 
-> **Mutation testing blocked**: You have uncommitted changes. Please commit or stash your changes before running mutation testing. This safety check ensures we can always restore your code to its original state.
+> **Mutation testing blocked**: `<source-file-path>` has uncommitted changes. Please commit or stash your changes before running mutation testing. This safety check ensures we can always restore your code to its original state.
 >
 > Run `git stash` or `git commit` and try again.
 
-Do NOT proceed past this point if git status is dirty.
+Do NOT proceed past this point if the target file has uncommitted changes.
 
 ### Step 0.3: Store original file content
 
 Read the entire source file and store its complete contents. You will use this to restore the file after every mutation. This is your **safety copy** — you will write this exact content back after each mutation.
 
-### Step 0.4: Verify compilation
+### Step 0.4: Detect sbt project structure
 
-Run:
+Determine if this is a multi-module sbt project by checking for the target file's location relative to any subproject directories. Run:
+```bash
+sbt projects 2>&1
+```
+
+If there are multiple projects, identify which subproject contains the source file based on its path (e.g., a file in `modules/core/src/...` likely belongs to the `core` project). Store the subproject name — you will prefix sbt commands with it (e.g., `sbt --client "core/testOnly ..."` instead of `sbt --client "testOnly ..."`).
+
+If there is only one project (or the root project), no prefix is needed.
+
+### Step 0.5: Start sbt server for incremental compilation
+
+Start the sbt server and verify compilation. The server keeps zinc's incremental compilation state in memory, so subsequent mutations only recompile the single changed file rather than cold-starting a new JVM each time.
+
+First, check if `sbt --client` (thin client) is available:
+```bash
+sbt --client "compile" 2>&1
+```
+
+Use a 180-second timeout (first invocation starts the server). If this succeeds, **use `sbt --client` for all subsequent sbt commands** in this session. The thin client connects to the running server, avoiding JVM startup overhead and enabling incremental compilation.
+
+If `--client` fails (e.g., older sbt version), fall back to plain `sbt` commands:
 ```bash
 sbt compile 2>&1
 ```
 
-Use a 120-second timeout. If compilation fails, stop and inform the user that the code must compile before mutation testing can begin.
+Store which mode is being used (client vs plain) for the rest of the session.
+
+If compilation fails in either mode, stop and inform the user that the code must compile before mutation testing can begin.
+
+### Step 0.6: Identify diff scope (--diff mode only)
+
+If `--diff` was specified, identify which lines in the source file were changed relative to the base branch:
+
+```bash
+git merge-base HEAD main 2>&1
+```
+
+If `main` doesn't exist, try `master`. Store the merge base commit hash, then:
+
+```bash
+git diff <merge-base> HEAD -- <source-file-path> 2>&1
+```
+
+Parse the diff output to extract the **changed line ranges** (lines added or modified). Store these line ranges — in Phase 1, only generate mutations targeting code within these ranges.
+
+If the file has no changes relative to the base branch, inform the user:
+
+> **No changes detected** in `<source-file-path>` relative to the base branch. Nothing to mutate in --diff mode.
 
 ---
 
-## Phase 1 — Analyze Source Code & Build Mutation Plan
+## Phase 1 — Locate Test Files & Analyze Source Code
 
-### Step 1.1: Understand the code
+### Step 1.1: Find test files
+
+Extract the class/object name (e.g., `UserService`) from the source file. Search for test files using common Scala conventions.
+
+Use Glob to search for:
+- `**/UserServiceSpec.scala`
+- `**/UserServiceTest.scala`
+- `**/UserServiceSuite.scala`
+
+Also use Grep to search in `src/test/scala/` (or the appropriate test directory for multi-module projects) for:
+- The class name (e.g., `UserService`)
+- Import statements referencing the class
+
+### Step 1.2: Extract test class names
+
+For each discovered test file, read it and extract the **fully qualified class name** (package + class name). You will use these with `sbt testOnly`.
+
+If no test files are found, stop and inform the user:
+
+> **No test files found** for `ClassName`. Mutation testing requires existing tests to run against. Please write tests first.
+
+### Step 1.3: Verify tests pass
+
+Run the discovered tests to confirm they pass before mutation testing begins:
+
+```bash
+sbt --client "testOnly fully.qualified.TestClass1 fully.qualified.TestClass2" 2>&1
+```
+
+(Use `sbt --client "<subproject>/testOnly ..."` for multi-module projects. If client mode is unavailable, use plain `sbt`.)
+
+Use a 120-second timeout. If tests fail, stop and inform the user that tests must pass before mutation testing can begin.
+
+### Step 1.4: Understand the code
 
 Read the source file carefully. Identify:
 - The class/object name and package
@@ -70,33 +148,46 @@ Read the source file carefully. Identify:
 
 If a **method name** was specified as the second argument, scope your analysis to only that method.
 
-### Step 1.2: Select mutations
+If **--diff mode** is active, focus your analysis on the changed line ranges identified in Step 0.6. You may still read surrounding context to understand the code, but only generate mutations for code within the changed ranges.
+
+### Step 1.5: Select mutations with semantic clustering
 
 Refer to the mutation catalog at `skills/mutate/mutation-catalog.md` for the full list of mutation operators organized by category.
 
-Select mutations following these principles:
-- **Prioritize by impact**: Choose mutations most likely to reveal untested behavior
+**Candidate identification**: Identify all possible mutation candidates in the target scope.
+
+**Semantic clustering**: Group candidates that test the same behavioral property into clusters. For example:
+- `filter(p)` → `filterNot(p)` and `filter(p)` → `filter(_ => true)` both test whether the filter predicate matters — they belong to the same cluster
+- `x >= 18` → `x > 18` and `x >= 18` → `x >= 19` both test the boundary at 18 — same cluster
+- `Some(x)` → `None` and `option.map(f)` → `None` on different variables test different Option paths — different clusters
+
+**Selection from clusters**: Pick **one representative mutation per cluster** — the one most likely to survive if behavior is untested. This maximizes the diversity of behavioral properties tested while avoiding redundant mutations that would produce the same test outcome.
+
+**General principles**:
 - **Diversify categories**: Cover multiple categories rather than exhausting one
 - **Target business logic**: Focus on methods that implement domain rules, not boilerplate
 - **Skip trivial code**: Don't mutate logging, toString, hashCode, or pure boilerplate
 - **One at a time**: Each mutation is independent — never combine mutations
 
-Cap the mutation plan at **25 mutations maximum**. If more candidates exist, select the 25 most impactful.
+Cap the mutation plan at **25 mutations maximum**. If more clusters exist, select the 25 most impactful.
 
-### Step 1.3: Present mutation plan
+### Step 1.6: Present mutation plan
 
 Present the plan as a numbered table for user confirmation:
 
 ```
 ## Mutation Plan for `ClassName`
 
-| # | Category | Location | Mutation Description |
-|---|----------|----------|---------------------|
-| 1 | Option | `method:line` | `Some(x)` → `None` |
-| 2 | Comparison | `method:line` | `age >= 18` → `age > 18` |
-| ... | ... | ... | ... |
+**Test classes**: `fully.qualified.TestClass1`, `fully.qualified.TestClass2`
+**Mode**: [standard | diff-scoped | method-scoped]
 
-**Total**: N mutations across M categories
+| # | Category | Location | Mutation Description | Cluster |
+|---|----------|----------|---------------------|---------|
+| 1 | Option | `method:line` | `Some(x)` → `None` | Option null-safety |
+| 2 | Comparison | `method:line` | `age >= 18` → `age > 18` | Age boundary |
+| ... | ... | ... | ... | ... |
+
+**Total**: N mutations across M categories (K clusters)
 
 Shall I proceed with this mutation plan?
 ```
@@ -105,84 +196,39 @@ Shall I proceed with this mutation plan?
 
 ---
 
-## Phase 2 — Locate Test Files
-
-### Step 2.1: Convention-based search
-
-Extract the class/object name (e.g., `UserService`) from the source file. Search for test files using common Scala conventions:
-
-Use Glob to search for:
-- `**/UserServiceSpec.scala`
-- `**/UserServiceTest.scala`
-- `**/UserServiceSuite.scala`
-
-### Step 2.2: Grep-based search
-
-Also search for test files that reference the class by name:
-
-Use Grep to search in `src/test/scala/` for:
-- The class name (e.g., `UserService`)
-- Import statements referencing the class
-
-### Step 2.3: Extract test class names
-
-For each discovered test file, read it and extract the **fully qualified class name** (package + class name). You will use these with `sbt testOnly`.
-
-If no test files are found, stop and inform the user:
-
-> **No test files found** for `ClassName`. Mutation testing requires existing tests to run against. Please write tests first.
-
-### Step 2.4: Verify tests pass
-
-Run the discovered tests to confirm they pass before mutation testing begins:
-
-```bash
-sbt "testOnly fully.qualified.TestClass1 fully.qualified.TestClass2" 2>&1
-```
-
-Use a 120-second timeout. If tests fail, stop and inform the user that tests must pass before mutation testing can begin.
-
----
-
-## Phase 3 — Apply & Test Loop
+## Phase 2 — Apply & Test Loop
 
 For each mutation in the plan, execute this cycle. **Always restore the original file after each mutation, regardless of outcome.**
 
-### Step 3.1: Apply mutation
+### Step 2.1: Apply mutation
 
 Use the **Edit** tool to apply the mutation to the source file. Make exactly one change.
 
-### Step 3.2: Compile check
+### Step 2.2: Run tests
 
 Run:
 ```bash
-sbt compile 2>&1
+sbt --client "testOnly fully.qualified.TestClass1 fully.qualified.TestClass2" 2>&1
 ```
 
-With a 120-second timeout. If compilation fails:
-- Record this mutation as **INCOMPILABLE**
-- Skip to Step 3.4 (restore)
-
-### Step 3.3: Run tests
-
-Run:
-```bash
-sbt "testOnly fully.qualified.TestClass1 fully.qualified.TestClass2" 2>&1
-```
+(Use `sbt --client "<subproject>/testOnly ..."` for multi-module projects. If client mode is unavailable, use plain `sbt`.)
 
 With a 120-second timeout. Interpret results:
 
+- **Compilation error in output** → Record as **INCOMPILABLE**, skip to Step 2.3
 - **Tests FAIL** → Mutation is **KILLED** (good — tests detected the change)
 - **Tests PASS** → Mutation **SURVIVED** (bad — tests missed the change)
 - **Timeout** → Record as **TIMEOUT**
 
-### Step 3.4: Restore original file (MANDATORY)
+Note: `sbt testOnly` compiles incrementally before running tests, so a separate compile step is unnecessary. With `--client`, only the mutated file is recompiled (zinc tracks file-level dependencies), making each iteration significantly faster than a cold `sbt` invocation. Look for `Compilation failed` or `error:` in the output to identify incompilable mutations.
+
+### Step 2.3: Restore original file (MANDATORY)
 
 **This step is non-negotiable.** After EVERY mutation, restore the file to its exact original content using the **Write** tool with the complete original file content stored in Phase 0.
 
 Do NOT use Edit to try to reverse the mutation. Always do a full file Write with the stored original content.
 
-### Step 3.5: Report progress
+### Step 2.4: Report progress
 
 After each mutation, output a one-line progress update:
 
@@ -193,72 +239,261 @@ After each mutation, output a one-line progress update:
 
 ---
 
-## Phase 4 — Generate Report
+## Phase 3 — Equivalent Mutant Detection
+
+After the mutation loop completes, analyze each **surviving** mutation to determine if it is semantically equivalent to the original code.
+
+### Step 3.1: Analyze each survivor
+
+For each mutation that SURVIVED, carefully reason about whether the mutation actually changes observable behavior:
+
+**A mutation is EQUIVALENT if**:
+- The mutated code produces the same output for all possible inputs (e.g., reordering independent side-effect-free statements)
+- The mutation is in dead code that can never be reached
+- Type constraints or domain invariants make the original and mutant behave identically (e.g., `x >= 0` → `x > 0` when `x` is always a positive Int due to upstream validation)
+- The mutation changes internal representation but not the public API contract (e.g., swapping equivalent collection implementations)
+
+**A mutation is NOT equivalent if**:
+- There exists any valid input that would produce a different output
+- The mutation changes error handling behavior, even for edge cases
+- The mutation affects performance characteristics that tests could observe (e.g., timeout-based tests)
+
+### Step 3.2: Document equivalence reasoning
+
+For each survivor, record your analysis:
+- **SURVIVED**: The mutation genuinely changes behavior that is untested
+- **EQUIVALENT**: The mutation does not change observable behavior (with explanation)
+
+### Step 3.3: Recalculate metrics
+
+Update the mutation score to exclude equivalent mutants:
+
+**Adjusted Mutation Score** = Killed / (Killed + Survived - Equivalent) x 100%
+
+Report both the raw and adjusted scores in the final report.
+
+---
+
+## Phase 4 — Higher-Order Mutations (optional)
+
+This phase runs if `--higher-order` was specified OR if the first-order mutation score is 90% or higher. Higher-order mutations combine two first-order mutations simultaneously, creating subtler faults that are harder to detect.
+
+### Step 4.1: Select higher-order mutation pairs
+
+From the **killed** first-order mutations, select pairs that:
+- Are in the same method or closely related methods
+- Individually are killed but might survive when combined (compensating mutations)
+- Target different categories (e.g., a comparison change + a return value change)
+
+Generate up to **10 higher-order mutations**. Each is a pair of two first-order mutations applied simultaneously.
+
+Refer to the higher-order mutation section in `skills/mutate/mutation-catalog.md` for guidance.
+
+### Step 4.2: Present higher-order plan
+
+```
+## Higher-Order Mutation Plan
+
+Your first-order score is X%. Testing with combined mutations to find deeper gaps.
+
+| # | Mutations Combined | Location | Description |
+|---|-------------------|----------|-------------|
+| H1 | #3 + #7 | `method:lines` | Some(x)→None AND filter→filterNot |
+| ... | ... | ... | ... |
+
+**Total**: N higher-order mutations
+
+Shall I proceed?
+```
+
+**Wait for user confirmation.**
+
+### Step 4.3: Apply & test higher-order mutations
+
+For each higher-order mutation:
+
+1. Apply **both** edits using the Edit tool (two separate Edit calls)
+2. Run tests (same as Phase 2, Step 2.2)
+3. Record result: KILLED / SURVIVED / INCOMPILABLE / TIMEOUT
+4. **Restore original file** using full Write (same as Phase 2, Step 2.3)
+
+### Step 4.4: Report progress
+
+```
+[H2/10] ✅ KILLED — Higher-order: #3 + #7 (Option + Collection)
+[H3/10] 🟡 SURVIVED — Higher-order: #5 + #12 (Option + Either)
+```
+
+---
+
+## Phase 5 — Generate Report
 
 After all mutations have been tested, generate a comprehensive report.
 
-### Step 4.1: Calculate metrics
+### Step 5.1: Calculate metrics
 
 - **Killed**: Mutations where tests failed (detected the change)
-- **Survived**: Mutations where tests passed (missed the change)
+- **Survived**: Mutations where tests passed (missed the change), excluding equivalents
+- **Equivalent**: Mutations that don't change observable behavior
 - **Incompilable**: Mutations that didn't compile
 - **Timed out**: Mutations that exceeded the timeout
 
-**Mutation Score** = Killed / (Killed + Survived) × 100%
+**Mutation Score (raw)** = Killed / (Killed + Survived + Equivalent) x 100%
+**Mutation Score (adjusted)** = Killed / (Killed + Survived) x 100%
 
-(Incompilable and timed-out mutations are excluded from the score.)
+The **adjusted score** is the primary metric. Equivalent and incompilable mutations are excluded.
 
-### Step 4.2: Determine quality rating
+If higher-order mutations were tested, calculate a separate **Higher-Order Score**.
+
+### Step 5.2: Determine quality rating
 
 | Score | Rating |
 |-------|--------|
-| 90–100% | **Strong** — Test suite thoroughly verifies the behavioral intent of this code. |
-| 75–89% | **Adequate** — Good behavioral coverage with some gaps to address. |
-| 60–74% | **Weak** — Significant behavioral gaps. The surviving mutations represent untested business logic. |
+| 90-100% | **Strong** — Test suite thoroughly verifies the behavioral intent of this code. |
+| 75-89% | **Adequate** — Good behavioral coverage with some gaps to address. |
+| 60-74% | **Weak** — Significant behavioral gaps. The surviving mutations represent untested business logic. |
 | Below 60% | **Critical** — Tests do not adequately verify the code's behavior. Major test improvements needed. |
 
-### Step 4.3: Generate the report
+### Step 5.3: Generate the report
 
 Follow the report template at `skills/mutate/report-template.md` and the example at `skills/mutate/examples/sample-report.md`.
 
-For each **surviving mutation**, provide:
+For each **surviving mutation** (non-equivalent), provide:
 1. What was changed and where
 2. Why it matters (what behavior is untested)
 3. A complete, runnable suggested test case in ScalaTest style matching the project's existing test patterns
 
-### Step 4.4: Output the report
+For each **equivalent mutation**, provide:
+1. What was changed
+2. Why it's equivalent (the reasoning from Phase 3)
+
+If higher-order mutations were tested, include a separate section with those results.
+
+### Step 5.4: Output the report
 
 Output the complete report directly in the conversation. Do NOT write it to a file unless the user asks.
 
 ---
 
-## Phase 5 — Final Safety Verification
+## Phase 6 — Auto-Fix: Write & Verify Tests (--fix mode only)
 
-### Step 5.1: Verify file integrity
+This phase only runs if `--fix` was specified. For each surviving (non-equivalent) mutation, write a test that kills it.
+
+### Step 6.1: Identify target test file
+
+Select the most appropriate test file to add new tests to. Prefer the primary test file discovered in Phase 1 (the `*Spec` or `*Test` file with the most existing tests for this class).
+
+Read the test file and note:
+- The test style used (FlatSpec, WordSpec, FunSuite, AnyFunSuite, etc.)
+- Import patterns
+- Helper methods / fixtures available
+- Where to insert new tests (typically at the end, before the closing brace)
+
+### Step 6.2: Write tests for each survivor
+
+For each surviving (non-equivalent) mutation, write a test case that:
+- Uses the same style and conventions as the existing tests
+- Has a descriptive name referencing the behavior being verified
+- Would FAIL when the mutation is applied (i.e., it specifically tests the behavior the mutation changes)
+- Would PASS on the original code
+
+Add all new tests to the test file using the **Edit** tool. Group them under a comment:
+
+```scala
+// Tests generated by semantic mutation testing
+```
+
+### Step 6.3: Verify tests pass on original code
+
+Run:
+```bash
+sbt --client "testOnly fully.qualified.TestClass" 2>&1
+```
+
+If any new test fails on the original code, it's a bad test. Remove it and log:
+```
+⚠️ Removed test for mutation #N — failed on original code
+```
+
+### Step 6.4: Verify tests kill mutations
+
+For each surviving mutation that now has a test:
+
+1. Apply the mutation using Edit
+2. Run `sbt --client "testOnly ..."`
+3. Verify the new test FAILS (mutation is now killed)
+4. Restore original file using Write
+5. If the test still passes on the mutation, remove it and log:
+```
+⚠️ Removed test for mutation #N — did not detect the mutation
+```
+
+### Step 6.5: Restore original source file
+
+After all verification, restore the source file to its original content using Write. The test file retains the new tests.
+
+### Step 6.6: Report results
+
+```
+## Auto-Fix Results
+
+| Mutation | Test Written | Passes Original | Kills Mutant | Status |
+|----------|-------------|-----------------|--------------|--------|
+| #5 | ✅ | ✅ | ✅ | **Added** |
+| #10 | ✅ | ✅ | ❌ | **Removed** (did not detect mutation) |
+| #11 | ✅ | ❌ | — | **Removed** (failed on original) |
+
+**Tests added**: N of M surviving mutations now have tests
+**New mutation score**: X% (was Y%)
+```
+
+---
+
+## Phase 7 — Final Safety Verification
+
+### Step 7.1: Verify source file integrity
 
 Read the source file one final time and compare its content to the original stored in Phase 0.
 
-### Step 5.2: Restore if needed
+### Step 7.2: Restore if needed
 
 If there is ANY discrepancy — even a single character — immediately restore the file using Write with the stored original content. Then inform the user:
 
 > **Safety check**: Detected file discrepancy after mutation testing. The file has been restored to its original state.
 
-### Step 5.3: Confirm clean state
+### Step 7.3: Shut down sbt server
+
+If client mode was used, shut down the sbt server to free resources:
+
+```bash
+sbt --client shutdown 2>&1
+```
+
+This is optional but good practice. The server will also shut down automatically after an idle timeout.
+
+### Step 7.4: Confirm clean state
 
 If the file matches the original, confirm:
 
 > **File integrity verified**: `source_file_path` matches its original content. No mutations remain.
 
+If `--fix` was used, also confirm:
+
+> **Test file updated**: `test_file_path` — N new tests added.
+
 ---
 
 ## Critical Rules
 
-1. **NEVER modify test files** — only the source file under test
+1. **NEVER modify test files** — only the source file under test (exception: `--fix` mode adds tests to test files)
 2. **NEVER run `sbt test`** — always use `sbt testOnly` with specific test classes
 3. **ALWAYS restore after every mutation** — use full Write, not reverse Edit
 4. **ALWAYS use 120-second timeouts** for sbt commands
-5. **Cap at 25 mutations** — select the most impactful ones if more exist
-6. **Stop on dirty git state** — do not proceed if there are uncommitted changes
-7. **Wait for user confirmation** after presenting the mutation plan before testing
-8. **One mutation at a time** — never apply multiple mutations simultaneously
+5. **Cap at 25 first-order mutations** — select the most impactful ones if more exist
+6. **Cap at 10 higher-order mutations** — select the most promising pairs
+7. **Stop on dirty target file** — do not proceed if the source file has uncommitted changes
+8. **Wait for user confirmation** after presenting mutation plans before testing
+9. **One mutation at a time** — never apply multiple mutations simultaneously (except higher-order pairs)
+10. **Handle multi-module projects** — prefix sbt commands with the subproject name when needed
+11. **Prefer `sbt --client`** — use the thin client for incremental compilation; fall back to plain `sbt` only if unavailable
+12. **Equivalent mutants are not failures** — do not count them against the test suite

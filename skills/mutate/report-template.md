@@ -1,130 +1,128 @@
 # Mutation Testing Report Template
 
-Use this template to generate the final mutation testing report. Fill in all `{{placeholder}}` values with actual data from the mutation testing run.
+Use this template structure to generate the final mutation testing report. Replace the placeholder descriptions with actual data from the mutation testing run. See `examples/sample-report.md` for a completed example.
 
 ---
 
-## Report Output Format
+## Report Structure
+
+The report should contain these sections in order:
+
+### Header
 
 ```markdown
 # Mutation Testing Report
 
-**File**: `{{source_file_path}}`
-**Date**: {{date}}
-**Mutations tested**: {{total_mutations}}
-**Test classes**: {{test_class_list}}
+**File**: `<source file path>`
+**Date**: <today's date>
+**Mutations tested**: <total attempted>
+**Test classes**: <comma-separated list of fully qualified test class names>
+**Mode**: <standard | diff-scoped | method-scoped>
+**Flags**: <--fix, --diff, --higher-order, or none>
+```
 
----
+### Score Summary
 
-## Score Summary
+A table with:
+- **Mutation Score (adjusted)**: killed / (killed + survived), excluding equivalent mutants — this is the primary metric
+- **Mutation Score (raw)**: killed / (killed + survived + equivalent)
+- Killed, Survived, Equivalent, Incompilable, and Timed Out counts
 
-| Metric | Value |
-|--------|-------|
-| **Mutation Score** | **{{killed}} / {{total}} ({{score_percent}}%)** |
-| Killed | {{killed}} |
-| Survived | {{survived}} |
-| Incompilable | {{incompilable}} |
-| Timed Out | {{timed_out}} |
+Include the quality rating (see Field Definitions below) and the rating scale table. The quality rating is based on the **adjusted** score.
 
-### Quality Rating
+### Detailed Results
 
-{{quality_rating}}
-
-| Score Range | Rating | Meaning |
-|------------|--------|---------|
-| 90–100% | **Strong** | Test suite thoroughly verifies behavior |
-| 75–89% | **Adequate** | Good coverage with some gaps |
-| 60–74% | **Weak** | Significant behavioral gaps in tests |
-| Below 60% | **Critical** | Tests do not adequately verify code behavior |
-
----
-
-## Detailed Results
+A table with one row per mutation:
 
 | # | Category | Location | Mutation | Result |
 |---|----------|----------|----------|--------|
-{{#each mutation_results}}
-| {{number}} | {{category}} | `{{location}}` | {{description}} | {{result_emoji}} **{{result}}** |
-{{/each}}
 
-Result key: ✅ KILLED · 🟡 SURVIVED · ⚠️ INCOMPILABLE · ⏱️ TIMEOUT
+Each result should use the emoji prefix: ✅ KILLED, 🟡 SURVIVED, ⚪ EQUIVALENT, ⚠️ INCOMPILABLE, ⏱️ TIMEOUT.
 
----
+### Equivalent Mutation Analysis
 
-## Surviving Mutation Analysis
+If any mutations were classified as equivalent, include a section explaining each:
 
-{{#if has_survivors}}
-The following mutations survived, indicating gaps in test coverage:
+For each equivalent mutation:
+- **What was changed**: Describe the specific edit
+- **Why it's equivalent**: Explain why the mutation does not change observable behavior
 
-{{#each surviving_mutations}}
-### Mutation #{{number}}: {{description}}
+If no mutations were equivalent, omit this section.
 
-**Category**: {{category}}
-**Location**: `{{location}}`
-**What was changed**: {{change_detail}}
-**Why it matters**: {{why_it_matters}}
+### Surviving Mutation Analysis
 
-**Suggested test case**:
-```scala
-{{suggested_test_code}}
-```
+For each surviving (non-equivalent) mutation, include a subsection with:
+- **Category** and **Location**
+- **What was changed**: Describe the specific edit
+- **Why it matters**: Explain what behavior is untested
+- **Suggested test case**: A complete, runnable ScalaTest test
 
----
-{{/each}}
+If all mutations were killed or equivalent, state: "All mutations were killed (or equivalent)! The test suite thoroughly verifies the behavior of this code."
 
-{{else}}
-All mutations were killed! The test suite thoroughly verifies the behavior of this code.
-{{/if}}
+### Higher-Order Mutation Results (if applicable)
 
----
+Only include this section if higher-order mutations were tested. Include:
 
-## Category Breakdown
+A results table:
 
-| Category | Tested | Killed | Survived | Kill Rate |
-|----------|--------|--------|----------|-----------|
-{{#each category_breakdown}}
-| {{category_name}} | {{tested}} | {{killed}} | {{survived}} | {{kill_rate}}% |
-{{/each}}
-| **Total** | **{{total}}** | **{{total_killed}}** | **{{total_survived}}** | **{{total_kill_rate}}%** |
+| # | Mutations Combined | Location | Description | Result |
+|---|-------------------|----------|-------------|--------|
 
----
+A **Higher-Order Score**: killed / (killed + survived) for higher-order mutations only.
 
-## Recommendations
+For each surviving higher-order mutation, explain:
+- Which two mutations were combined
+- Why the combination survived (what interaction between behaviors is untested)
+- A suggested test that would detect the combined fault
 
-{{#each recommendations}}
-{{priority}}. **{{title}}**: {{description}}
-{{/each}}
+### Category Breakdown
 
----
+A summary table showing per-category counts:
 
-*Generated by semantic mutation testing with Claude*
-```
+| Category | Attempted | Killed | Survived | Equivalent | Kill Rate |
+|----------|-----------|--------|----------|------------|-----------|
+
+Include a **Total** row. "Attempted" counts only compilable mutations. Kill Rate = killed / (killed + survived), excluding equivalents.
+
+### Auto-Fix Results (if --fix was used)
+
+Only include if `--fix` mode was used. Show a table:
+
+| Mutation | Test Written | Passes Original | Kills Mutant | Status |
+|----------|-------------|-----------------|--------------|--------|
+
+Summary: how many tests were added, how many were removed (failed verification), and the new adjusted mutation score.
+
+### Recommendations
+
+A numbered list (1 = highest priority) of actionable improvements. Focus on:
+1. Surviving mutations representing the most critical business logic gaps
+2. Entire untested categories
+3. Test cases that would kill multiple surviving mutations at once
+4. Structural test improvements
+5. Higher-order mutation gaps (if applicable)
+
+End with: `*Generated by semantic mutation testing with Claude*`
 
 ---
 
 ## Field Definitions
 
 ### Quality Rating
-Calculate based on kill rate (killed / (killed + survived)):
-- **90–100%**: "**Strong** — Test suite thoroughly verifies the behavioral intent of this code."
-- **75–89%**: "**Adequate** — Good behavioral coverage with some gaps to address."
-- **60–74%**: "**Weak** — Significant behavioral gaps. The surviving mutations represent untested business logic."
+Calculate based on **adjusted** kill rate (killed / (killed + survived)):
+- **90-100%**: "**Strong** — Test suite thoroughly verifies the behavioral intent of this code."
+- **75-89%**: "**Adequate** — Good behavioral coverage with some gaps to address."
+- **60-74%**: "**Weak** — Significant behavioral gaps. The surviving mutations represent untested business logic."
 - **Below 60%**: "**Critical** — Tests do not adequately verify the code's behavior. Major test improvements needed."
 
-Note: Incompilable and timed-out mutations are excluded from the kill rate calculation.
+Note: Equivalent, incompilable, and timed-out mutations are excluded from the adjusted kill rate.
 
 ### Result Emoji Mapping
 - `KILLED` → ✅
 - `SURVIVED` → 🟡
+- `EQUIVALENT` → ⚪
 - `INCOMPILABLE` → ⚠️
 - `TIMEOUT` → ⏱️
-
-### Recommendation Priorities
-Number recommendations by priority (1 = highest). Focus on:
-1. Surviving mutations that represent the most critical business logic gaps
-2. Entire untested categories (e.g., no Option handling tests)
-3. Specific test cases that would kill multiple surviving mutations at once
-4. Structural test improvements (e.g., "Add boundary condition tests for method X")
 
 ### Location Format
 Use `ClassName.methodName:lineNumber` format, e.g., `UserService.validateEmail:42`.

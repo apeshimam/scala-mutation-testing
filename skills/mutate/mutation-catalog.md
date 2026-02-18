@@ -76,17 +76,17 @@ Mutate boolean constants to verify branching is tested.
 
 ## Category 5: Return Value Mutations
 
-Replace return values with boundary/zero/empty values.
+Replace method body expressions with boundary/zero/empty values.
 
 | Original | Mutation | Rationale |
 |----------|----------|-----------|
-| `return x` (Int) | `return 0` | Verify non-zero result matters |
-| `return x` (Int) | `return -1` | Verify specific value matters |
-| `return x` (Int) | `return x + 1` | Verify exact value matters |
-| `return x` (String) | `return ""` | Verify non-empty result matters |
-| `return x` (Boolean) | `return !x` | Verify boolean result matters |
-| `return x` (List) | `return Nil` | Verify non-empty collection matters |
-| Method body expression | Negate/invert the expression | Verify the result is used |
+| `def foo: Int = expr` | Replace body with `0` | Verify non-zero result matters |
+| `def foo: Int = expr` | Replace body with `-1` | Verify specific value matters |
+| `def foo: Int = expr` | Replace body with `expr + 1` | Verify exact value matters |
+| `def foo: String = expr` | Replace body with `""` | Verify non-empty result matters |
+| `def foo: Boolean = expr` | Replace body with `!expr` | Verify boolean result matters |
+| `def foo: List[A] = expr` | Replace body with `Nil` | Verify non-empty collection matters |
+| `def foo: A = expr` | Negate/invert the expression | Verify the result is used |
 
 ---
 
@@ -317,15 +317,50 @@ Mutate error handling to verify exception paths are tested.
 
 ---
 
+## Category 18: Higher-Order Mutations
+
+Higher-order mutations combine two first-order mutations simultaneously. A "subsuming" higher-order mutant is harder to kill than either constituent mutation alone, revealing deeper test gaps.
+
+### When to Use
+
+- When first-order mutation score is 90%+ (test suite is already strong)
+- When `--higher-order` flag is specified
+- To find compensating mutation pairs where two bugs cancel each other out
+
+### Pair Selection Strategy
+
+Select pairs where the two mutations might **compensate** — where one mutation's effect could mask the other's:
+
+| Pair Type | Example | Rationale |
+|-----------|---------|-----------|
+| Comparison + Return value | `>=` → `>` AND return `x` → `x + 1` | Off-by-one in check compensated by off-by-one in result |
+| Filter + Size check | `filter(p)` → `filterNot(p)` AND `isEmpty` → `nonEmpty` | Inverted filter compensated by inverted emptiness check |
+| Option + Pattern match | `Some(x)` → `None` AND swap case branches | None value hits the swapped branch, producing original behavior |
+| Boolean + Logical | `true` → `false` AND `&&` → `\|\|` | Flipped boolean with flipped logic can restore original behavior |
+| Arithmetic + Comparison | `a + b` → `a - b` AND `>` → `<` | Sign change compensated by direction change |
+| Negation + Branch swap | `!condition` → `condition` AND swap if/else bodies | Double negation restores original behavior |
+
+### Guidelines
+
+- **Cap at 10 higher-order mutations** per run
+- Only pair mutations from **killed** first-order mutants (pairing survivors has no diagnostic value)
+- Prefer pairs in the **same method** or closely related methods
+- Prefer pairs from **different categories** for maximum diversity
+- A surviving higher-order mutant means the tests verify each behavior independently but not their interaction
+
+---
+
 ## Mutation Selection Guidelines
 
 When building a mutation plan for a file:
 
 1. **Prioritize by impact**: Start with mutations most likely to reveal untested behavior
-2. **One mutation at a time**: Never apply multiple mutations simultaneously
+2. **One mutation at a time**: Never apply multiple mutations simultaneously (except higher-order pairs)
 3. **Semantic over syntactic**: Prefer mutations that change meaning over mechanical swaps
 4. **Skip trivial code**: Don't mutate logging, toString, hashCode, or pure boilerplate
-5. **Cap at 25 mutations**: Select the most impactful 25 if more candidates exist
+5. **Cap at 25 first-order mutations**: Select the most impactful 25 if more candidates exist
 6. **Diversify categories**: Cover multiple categories rather than exhausting one
 7. **Target business logic**: Focus on methods that implement domain rules
 8. **Consider method scope**: If user specified a method, only mutate within that method
+9. **Use semantic clustering**: Group mutations that test the same behavioral property, pick one per cluster
+10. **Respect diff scope**: If `--diff` mode is active, only mutate within changed line ranges
