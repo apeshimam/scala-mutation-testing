@@ -1,9 +1,10 @@
 # Mutation Testing Report
 
 **File**: `src/main/scala/com/example/services/UserService.scala`
+**Language**: Scala
 **Date**: 2026-02-15
 **Mutations tested**: 18
-**Test classes**: `com.example.services.UserServiceSpec`, `com.example.services.UserValidationSpec`
+**Test identifiers**: `com.example.services.UserServiceSpec`, `com.example.services.UserValidationSpec`
 **Mode**: standard
 **Flags**: --higher-order
 
@@ -194,6 +195,41 @@ First-order adjusted score was 81%, so higher-order testing was triggered via `-
 
 ---
 
+## Overmocking Analysis
+
+| Test File | Framework | Mock Setups | Assertions | Ratio | Severity | Indicators |
+|-----------|-----------|-------------|------------|-------|----------|------------|
+| `UserServiceSpec.scala` | mockito-scala | 12 | 8 | 1.5:1 | **Moderate** | Excessive any(), Verify-only tests |
+| `UserValidationSpec.scala` | mockito-scala | 3 | 14 | 0.2:1 | **None** | — |
+
+**Overall severity**: **Moderate**
+
+### Indicator: Excessive `any()` matchers
+
+**What was detected**: 8 of 12 mock setups in `UserServiceSpec.scala` use `any` or `any[T]` matchers instead of specific expected values. For example:
+- Line 45: `when(userRepo.findById(any[Long])).thenReturn(Some(testUser))`
+- Line 62: `when(userRepo.save(any[User])).thenReturn(Right(savedUser))`
+
+**Why it matters**: Wildcard matchers don't verify that the correct arguments are passed to dependencies. A mutation that changes which ID is looked up or which user is saved would not be caught by mock setup verification.
+
+**Suggestion**: Replace `any[Long]` with the specific expected ID (e.g., `eqTo(42L)`) and `any[User]` with a matcher that verifies key fields (e.g., `argThat(_.email == "alice@example.com")`).
+
+### Indicator: Verify-only tests
+
+**What was detected**: 2 test cases in `UserServiceSpec.scala` use only `verify()` calls without outcome assertions:
+- Line 78: `"deleteUser should call repository delete"` — verifies `verify(userRepo).delete(any[Long])` but does not assert the return value or side effects
+- Line 91: `"createUser should notify event bus"` — verifies `verify(eventBus).publish(any[UserEvent])` but does not assert the created user's properties
+
+**Why it matters**: These tests confirm that a method was *called* but not that it produced the *correct result*. Mutations that change return values, error handling, or business logic in the tested methods would survive because the tests only check interaction, not outcomes.
+
+**Suggestion**: Add outcome assertions alongside `verify()` calls. For example, in the `deleteUser` test, also assert that the method returns `Right(())` on success. In the `createUser` test, assert the returned user has the expected fields.
+
+### Correlation with surviving mutations
+
+> ⚠️ **Overmocking correlation**: Mutation #5 survived in `UserService.getDisplayName:42` — this method is exercised in `UserServiceSpec.scala` where 8 of 12 mock setups use `any()` matchers. The test for `getDisplayName` mocks the user repository with `any` and only verifies the fallback path. Consider testing with a specific user that has a display name set.
+
+---
+
 ## Recommendations
 
 1. **Add tests for `getDisplayName` Some path**: The Option handling in `getDisplayName` only tests the `None`/default case. Add a test that provides a `Some` display name and verifies it's returned.
@@ -205,6 +241,10 @@ First-order adjusted score was 81%, so higher-order testing was triggered via `-
 4. **Fix test data for sort order testing**: Mutation #10 was classified as equivalent because test fixtures use identical first/last names. Update test data to use distinct values, then add a sort-order assertion.
 
 5. **Test `isActive`/`handleStatus` interaction**: Higher-order mutation H4 revealed that these two features are tested in isolation. Add an integration test verifying that active status correctly influences status handling outcomes.
+
+6. **Replace `any()` matchers with specific values in `UserServiceSpec`**: 8 of 12 mock setups use wildcard matchers, which means tests don't verify correct arguments are passed to dependencies. Use `eqTo(...)` or `argThat(...)` for key interactions.
+
+7. **Add outcome assertions to verify-only tests**: Two tests in `UserServiceSpec` only use `verify()` without asserting results. Add `shouldBe` assertions to check return values alongside interaction verification.
 
 ---
 

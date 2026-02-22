@@ -1,29 +1,42 @@
-# Scala Semantic Mutation Testing
+# Semantic Mutation Testing
 
-A Claude Code plugin that performs **semantic mutation testing** on Scala source files. Unlike mechanical mutation tools (e.g., Stryker4s), this leverages Claude's code understanding to generate semantically meaningful mutations — testing whether your test suite actually verifies the *intent* of your code, not just its syntax.
+A Claude Code plugin that performs **semantic mutation testing** on source files. Unlike mechanical mutation tools, this leverages Claude's code understanding to generate semantically meaningful mutations — testing whether your test suite actually verifies the *intent* of your code, not just its syntax.
+
+## Supported Languages
+
+| Language | Extensions | Build Tool | Test Framework |
+|----------|-----------|------------|----------------|
+| **Scala** | `.scala` | sbt (1.4+ for `--client`) | ScalaTest |
+| **Python** | `.py` | None (any package manager) | pytest, unittest |
+| **TypeScript** | `.ts`, `.tsx` | npm/yarn/pnpm/bun | Jest, Vitest, Mocha |
 
 ## Requirements
 
-- **sbt** build tool (1.4+ recommended for `--client` incremental compilation)
-- **ScalaTest** test framework
-- Clean git working tree (uncommitted changes to the target file will block the run)
+- **Git** — clean working tree required (uncommitted changes to the target file will block the run)
+- **Scala**: sbt build tool (1.4+ recommended for incremental compilation via `--client`)
+- **Python**: pytest (or unittest); Poetry, Pipenv, uv, or pip for dependency management
+- **TypeScript**: `package.json` with a test framework; `tsconfig.json` for compilation checks
 
 ## Installation
 
 ```bash
-claude --plugin-dir /path/to/scala-mutation-testing
+claude install-skill /path/to/mutation-testing
 ```
 
 ## Usage
 
 ```
 /mutate src/main/scala/com/example/MyService.scala
+/mutate src/services/user_service.py
+/mutate src/services/user-service.ts
 ```
 
-Scope to a single method:
+Scope to a single method/function:
 
 ```
 /mutate src/main/scala/com/example/MyService.scala validateEmail
+/mutate src/services/user_service.py validate_email
+/mutate src/services/user-service.ts validateEmail
 ```
 
 ### Flags
@@ -37,19 +50,46 @@ Scope to a single method:
 Flags can be combined:
 
 ```
-/mutate src/main/scala/com/example/MyService.scala --diff --fix
+/mutate src/services/user_service.py --diff --fix
 ```
 
-## What it does
+## What It Does
 
-1. **Safety checks** — verifies clean git state, stores original file, starts sbt server
-2. **Locates tests** — finds test files by convention (`*Spec`, `*Test`, `*Suite`) and grep
-3. **Analyzes your code** — identifies mutation targets across 18 categories using semantic clustering
-4. **Applies mutations one at a time** — edits source, runs `sbt testOnly` (incremental), restores original
+1. **Safety checks** — verifies clean git state, stores original file, initializes build tools
+2. **Locates tests** — finds test files by naming convention and import analysis
+3. **Analyzes your code** — identifies mutation targets using semantic clustering across shared + language-specific categories
+4. **Applies mutations one at a time** — edits source, runs targeted tests, restores original
 5. **Detects equivalent mutants** — analyzes survivors to identify mutations that don't change behavior
 6. **Higher-order mutations** — optionally combines killed mutations to find deeper gaps
 7. **Generates a report** — adjusted score, surviving mutation analysis, suggested test cases
 8. **Auto-fix** (`--fix`) — writes suggested tests, verifies they pass on original and kill mutants
+
+## Mutation Categories
+
+### Shared (All Languages)
+
+| # | Category | Examples |
+|---|----------|----------|
+| 1 | Arithmetic | `+` ↔ `-`, `*` ↔ `/` |
+| 2 | Comparison | `<` ↔ `<=`, `==` ↔ `!=` |
+| 3 | Logical | `&&` ↔ `\|\|`, negate `!` |
+| 4 | Boolean literals | `true` ↔ `false` |
+| 5 | Return values | Replace with zero/empty/negated |
+| 6 | String operations | Empty strings, swap case transforms |
+| 7 | Numeric literals | Off-by-one, negate, zero substitution |
+| 8 | Exception handling | Remove catch/finally, broaden catch |
+
+### Scala-Specific (9 categories)
+
+Option semantics, Either semantics, Try semantics, collection operations, pattern matching, for comprehensions, higher-order functions, implicits/givens, case class copy.
+
+### Python-Specific (13 categories)
+
+Dictionary operations, list/dict/set comprehensions, context managers, decorators, generators/iterators, default/mutable arguments, type-specific operations, unpacking/starred, collection operations, pattern matching (3.10+), walrus operator, f-string mutations, property mutations.
+
+### TypeScript-Specific (12 categories)
+
+Optional chaining, nullish coalescing, type guards, discriminated unions, Promise/async operations, enum mutations, array operations, object operations, type assertions, template literals, logical assignment, control flow patterns.
 
 ## Key Features
 
@@ -58,6 +98,9 @@ Mutations are grouped by the behavioral property they test. One representative i
 
 ### Equivalent Mutant Detection
 Surviving mutations are analyzed to determine if they actually change observable behavior. Equivalent mutants are excluded from the kill rate, giving you a more accurate picture of your test suite's strength.
+
+### Overmocking Detection
+Test files are analyzed for mocking anti-patterns (mocking the SUT, high mock-to-assertion ratios, excessive wildcard matchers, verify-only tests). Surviving mutations are cross-referenced with overmocking findings.
 
 ### Diff-Scoped Mode (`--diff`)
 Only mutates lines changed in the current branch vs the base branch. Ideal for CI/PR workflows — test the code you actually changed.
@@ -72,31 +115,8 @@ For each surviving mutation, writes a test case into the test file, then verifie
 
 Tests that fail verification are automatically removed.
 
-### Incremental Compilation
+### Incremental Compilation (Scala)
 Uses `sbt --client` to keep the sbt server running across mutations. Zinc tracks file-level dependencies, so each mutation only recompiles the single changed file.
-
-## Mutation Categories
-
-| # | Category | Examples |
-|---|----------|----------|
-| 1 | Arithmetic | `+` ↔ `-`, `*` ↔ `/` |
-| 2 | Comparison | `<` ↔ `<=`, `==` ↔ `!=` |
-| 3 | Logical | `&&` ↔ `\|\|`, negate `!` |
-| 4 | Boolean literals | `true` ↔ `false` |
-| 5 | Return values | Replace with zero/empty/negated |
-| 6 | Option | `Some(x)` → `None`, `getOrElse` → always default |
-| 7 | Either | `Right` ↔ `Left` |
-| 8 | Try | `Success` → `Failure`, remove `.recover` |
-| 9 | Collections | `filter` ↔ `filterNot`, `exists` ↔ `forall` |
-| 10 | Pattern matching | Swap branches, remove/negate guards |
-| 11 | For comprehensions | Remove/negate guards |
-| 12 | Higher-order functions | Replace with identity/constant |
-| 13 | Implicits/givens | Remove implicits, reverse Ordering |
-| 14 | Case class copy | Skip copy, drop field updates |
-| 15 | String | Empty strings, swap case transforms |
-| 16 | Numeric literals | Off-by-one, negate, zero substitution |
-| 17 | Exception handling | Remove catch/finally, broaden catch |
-| 18 | Higher-order (combined) | Compensating mutation pairs |
 
 ## Safety
 
@@ -104,9 +124,9 @@ Uses `sbt --client` to keep the sbt server running across mutations. Zinc tracks
 - Full file restore (Write, not reverse-Edit) after every mutation
 - Post-run integrity verification with automatic restore on discrepancy
 - Never modifies test files (except in `--fix` mode, which only adds tests)
-- Always uses `sbt testOnly`, never `sbt test`
-- 25 first-order mutation cap, 10 higher-order cap, 120s timeout per sbt command
-- sbt server shut down after run completes
+- Always uses targeted test commands, never runs the full test suite
+- 25 first-order mutation cap, 10 higher-order cap, 120s timeout per test command
+- Build server cleanup after run completes (Scala)
 
 ## License
 

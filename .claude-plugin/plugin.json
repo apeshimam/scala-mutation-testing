@@ -1,7 +1,7 @@
 {
-  "name": "scala-mutation-testing",
-  "description": "Semantic mutation testing for Scala — uses Claude's code understanding to generate meaningful mutations that test whether your test suite verifies the intent of your code, not just its syntax.",
-  "version": "1.0.0",
+  "name": "mutation-testing",
+  "description": "Semantic mutation testing for Scala, Python, and TypeScript — uses Claude's code understanding to generate meaningful mutations that test whether your test suite verifies the intent of your code.",
+  "version": "2.0.0",
   "author": "apeshimam",
   "repository": "https://github.com/apeshimam/scala-mutation-testing",
   "license": "MIT"
